@@ -349,9 +349,20 @@ class PlayerActivity : AppCompatActivity() {
         lifecycleScope.launch { playVideo(uri) }
     }
 
+
+
     private suspend fun playVideo(uri: Uri) = withContext(Dispatchers.Default) {
-        val mediaItem = MediaItem.Builder().setUri(uri).setMediaId(uri.toString())
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(playerApi.title).build()).build()
+        // بناء MediaItem مع إعدادات البث المباشر
+        val mediaItem = MediaItem.Builder()
+            .setUri(uri)
+            .setMediaId(uri.toString())
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(playerApi.title).build())
+
+            // -->> هذا هو السطر المهم الذي يجب إضافته <<--
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().build())
+
+            .build()
+
         withContext(Dispatchers.Main) {
             mediaController?.run {
                 setMediaItem(mediaItem, playerApi.position?.toLong() ?: C.TIME_UNSET)
