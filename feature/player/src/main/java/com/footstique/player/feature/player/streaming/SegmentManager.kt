@@ -19,7 +19,9 @@ import java.util.concurrent.ConcurrentHashMap
  * 3. Ensures smooth transitions between segments
  */
 @UnstableApi
-class SegmentManager {
+class SegmentManager(
+    private val config: StreamingConfig = StreamingConfig.default()
+) {
     
     private val preloadedSegments = ConcurrentHashMap<Uri, SegmentInfo>()
     private val segmentHistory = mutableListOf<SegmentInfo>()
@@ -100,8 +102,8 @@ class SegmentManager {
                 analyzePtsContinuity(previousSegment, currentSegment)
             }
             
-            // Keep only last 10 segments in history
-            if (segmentHistory.size > 10) {
+            // Keep only last N segments in history
+            if (segmentHistory.size > config.segmentHistorySize) {
                 segmentHistory.removeAt(0)
             }
             
@@ -114,22 +116,28 @@ class SegmentManager {
      * Analyzes PTS continuity between segments
      */
     private fun analyzePtsContinuity(previous: SegmentInfo, current: SegmentInfo) {
+        if (!config.enablePtsContinuityCheck) return
+        
         val expectedStartPts = previous.endPts
         val actualStartPts = current.startPts
         val ptsDifference = actualStartPts - expectedStartPts
         
-        if (Math.abs(ptsDifference) > 1000) { // 1ms tolerance
-            Timber.w(
-                "PTS discontinuity detected: expected=$expectedStartPts, actual=$actualStartPts, " +
-                "difference=$ptsDifference ms"
-            )
+        if (Math.abs(ptsDifference) > config.ptsToleranceMs) {
+            if (config.logPtsContinuity) {
+                Timber.w(
+                    "PTS discontinuity detected: expected=$expectedStartPts, actual=$actualStartPts, " +
+                    "difference=$ptsDifference ms"
+                )
+            }
             
             // Here you could implement corrective measures:
             // 1. Adjust playback timing
             // 2. Insert silence/black frames
             // 3. Request segment re-fetch
         } else {
-            Timber.d("PTS continuity maintained: difference=$ptsDifference ms")
+            if (config.logPtsContinuity) {
+                Timber.d("PTS continuity maintained: difference=$ptsDifference ms")
+            }
         }
     }
     
@@ -137,17 +145,17 @@ class SegmentManager {
      * Cleans up old preloaded segments to prevent memory leaks
      */
     private fun cleanupOldSegments() {
-        val maxPreloadedSegments = 3
         val currentTime = System.currentTimeMillis()
-        val maxAge = 30000L // 30 seconds
         
         val segmentsToRemove = preloadedSegments.entries.filter { (_, segmentInfo) ->
-            currentTime - segmentInfo.timestamp > maxAge
-        }.take(preloadedSegments.size - maxPreloadedSegments)
+            currentTime - segmentInfo.timestamp > config.segmentCacheMaxAgeMs
+        }.take(preloadedSegments.size - config.maxPreloadedSegments)
         
         segmentsToRemove.forEach { (uri, _) ->
             preloadedSegments.remove(uri)
-            Timber.d("Cleaned up old preloaded segment: $uri")
+            if (config.enableDebugLogging) {
+                Timber.d("Cleaned up old preloaded segment: $uri")
+            }
         }
     }
     
@@ -166,9 +174,7 @@ class SegmentManager {
      * Calculates optimal preload timing based on segment duration
      */
     fun calculatePreloadTiming(segmentDuration: Long): Long {
-        // Preload when 25% of segment remains (minimum 3 seconds, maximum 8 seconds)
-        val preloadTime = (segmentDuration * 0.25).toLong()
-        return preloadTime.coerceIn(3000L, 8000L)
+        return config.calculatePreloadTiming(segmentDuration)
     }
     
     /**

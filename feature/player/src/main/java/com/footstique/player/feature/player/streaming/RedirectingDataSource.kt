@@ -100,51 +100,84 @@ class RedirectingDataSource(
      * Resolves HTTP 302 redirect to get the actual segment URL
      */
     private fun resolveRedirect(uri: Uri): Uri {
-        val connection = URL(uri.toString()).openConnection() as HttpURLConnection
-        connection.instanceFollowRedirects = false
-        connection.requestMethod = "HEAD"
-        
-        try {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = URL(uri.toString()).openConnection() as HttpURLConnection
+            connection.instanceFollowRedirects = false
+            connection.requestMethod = "HEAD"
+            connection.connectTimeout = 5000 // 5 seconds timeout
+            connection.readTimeout = 5000    // 5 seconds timeout
+            
             val responseCode = connection.responseCode
-            return when (responseCode) {
+            when (responseCode) {
                 HttpURLConnection.HTTP_MOVED_TEMP, 
                 HttpURLConnection.HTTP_MOVED_PERM,
                 HttpURLConnection.HTTP_SEE_OTHER,
                 307, 308 -> {
                     val location = connection.getHeaderField("Location")
                     if (location != null) {
-                        Timber.d("Redirect from $uri to $location")
-                        Uri.parse(location)
+                        val redirectUri = if (location.startsWith("http")) {
+                            Uri.parse(location)
+                        } else {
+                            // Handle relative redirects
+                            val baseUri = "${uri.scheme}://${uri.host}"
+                            val port = if (uri.port != -1) ":${uri.port}" else ""
+                            Uri.parse("$baseUri$port$location")
+                        }
+                        Timber.d("Redirect from $uri to $redirectUri")
+                        redirectUri
                     } else {
                         Timber.w("Redirect response but no Location header found")
                         uri
                     }
                 }
+                HttpURLConnection.HTTP_OK -> {
+                    // Direct access without redirect
+                    Timber.d("Direct access (no redirect): $uri")
+                    uri
+                }
                 else -> {
-                    Timber.d("No redirect, using original URI: $uri")
+                    Timber.w("Unexpected response code: $responseCode for $uri")
                     uri
                 }
             }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to resolve redirect for $uri")
+            // Fallback to original URI on error
+            uri
         } finally {
-            connection.disconnect()
+            connection?.disconnect()
         }
     }
 
     /**
-     * Schedules preloading of the next segment 3-4 seconds before current segment ends
+     * Schedules preloading of the next segment based on dynamic timing
      */
     private fun scheduleNextSegmentPreload(currentSegmentUri: Uri) {
         preloadJob?.cancel()
         preloadJob = coroutineScope.launch {
             try {
-                // Wait for 3 seconds before preloading (this could be calculated based on segment duration)
-                delay(3000)
+                // Try to estimate segment duration from current playback
+                // For now, use a default of 6 seconds (typical segment length)
+                val estimatedDuration = 6000L
+                val preloadDelay = segmentManager.calculatePreloadTiming(estimatedDuration)
+                
+                Timber.d("Scheduling next segment preload in ${preloadDelay}ms")
+                delay(preloadDelay)
                 
                 // Request next segment redirect
                 val nextSegmentUri = resolveRedirect(originalUri)
                 if (nextSegmentUri != currentSegmentUri) {
                     Timber.d("Preloading next segment: $nextSegmentUri")
                     segmentManager.preloadSegment(nextSegmentUri)
+                } else {
+                    Timber.d("Next segment URI same as current, will retry in 1 second")
+                    delay(1000)
+                    // Try once more
+                    val retrySegmentUri = resolveRedirect(originalUri)
+                    if (retrySegmentUri != currentSegmentUri) {
+                        segmentManager.preloadSegment(retrySegmentUri)
+                    }
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Failed to preload next segment")
