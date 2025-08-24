@@ -352,15 +352,24 @@ class PlayerActivity : AppCompatActivity() {
 
 
     private suspend fun playVideo(uri: Uri) = withContext(Dispatchers.Default) {
-        // بناء MediaItem مع إعدادات البث المباشر
+        // بناء MediaItem مع إعدادات البث المباشر المحسنة للSegmented Streaming
+        val liveConfigurationBuilder = MediaItem.LiveConfiguration.Builder()
+        
+        // تحسين إعدادات البث المباشر للSegmented Streaming
+        if (isSegmentedLiveStream(uri)) {
+            liveConfigurationBuilder
+                .setTargetOffsetMs(3000) // 3 seconds offset for live streaming
+                .setMinOffsetMs(1000)    // Minimum 1 second offset
+                .setMaxOffsetMs(10000)   // Maximum 10 seconds offset
+                .setMinPlaybackSpeed(0.97f) // Slightly slower to catch up
+                .setMaxPlaybackSpeed(1.03f) // Slightly faster to catch up
+        }
+        
         val mediaItem = MediaItem.Builder()
             .setUri(uri)
             .setMediaId(uri.toString())
             .setMediaMetadata(MediaMetadata.Builder().setTitle(playerApi.title).build())
-
-            // -->> هذا هو السطر المهم الذي يجب إضافته <<--
-            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().build())
-
+            .setLiveConfiguration(liveConfigurationBuilder.build())
             .build()
 
         withContext(Dispatchers.Main) {
@@ -370,6 +379,16 @@ class PlayerActivity : AppCompatActivity() {
                 prepare()
             }
         }
+    }
+    
+    /**
+     * تحقق من كون الرابط مناسب للSegmented Live Streaming
+     */
+    private fun isSegmentedLiveStream(uri: Uri): Boolean {
+        val uriString = uri.toString()
+        return (uriString.startsWith("http://") || uriString.startsWith("https://")) &&
+               !uriString.contains(".m3u8") && // ليس HLS عادي
+               !uriString.contains(".mpd")     // ليس DASH
     }
 
     private fun playbackStateListener() = object : Player.Listener {
@@ -400,10 +419,68 @@ class PlayerActivity : AppCompatActivity() {
                 .create().show()
         }
         override fun onPlaybackStateChanged(playbackState: Int) {
-            if (playbackState == Player.STATE_ENDED) {
-                isPlaybackFinished = true
-                finish()
+            when (playbackState) {
+                Player.STATE_ENDED -> {
+                    isPlaybackFinished = true
+                    finish()
+                }
+                Player.STATE_BUFFERING -> {
+                    // Handle buffering for live streams
+                    handleLiveStreamBuffering()
+                }
+                Player.STATE_READY -> {
+                    // Stream is ready, could log segment info
+                    Timber.d("Live stream ready, current position: ${mediaController?.currentPosition}")
+                }
             }
+        }
+        
+        override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+            // Handle segment transitions in live streaming
+            mediaItem?.let {
+                Timber.d("Media item transition: ${it.mediaId}, reason: $reason")
+                if (isSegmentedLiveStream(it.localConfiguration?.uri ?: Uri.EMPTY)) {
+                    handleSegmentTransition(it)
+                }
+            }
+        }
+        
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            // Handle position discontinuities which may indicate segment boundaries
+            if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
+                Timber.d("Auto transition from ${oldPosition.positionMs} to ${newPosition.positionMs}")
+                // This could indicate a segment boundary in live streaming
+            }
+        }
+    }
+
+    /**
+     * معالجة حالة التخزين المؤقت للبث المباشر
+     */
+    private fun handleLiveStreamBuffering() {
+        mediaController?.currentMediaItem?.let { mediaItem ->
+            if (isSegmentedLiveStream(mediaItem.localConfiguration?.uri ?: Uri.EMPTY)) {
+                Timber.d("Live stream buffering, checking for network issues or segment delays")
+                // يمكن إضافة منطق إضافي هنا لمعالجة تأخير الSegments
+            }
+        }
+    }
+    
+    /**
+     * معالجة انتقال الSegments في البث المباشر
+     */
+    private fun handleSegmentTransition(mediaItem: androidx.media3.common.MediaItem) {
+        Timber.d("Handling segment transition for: ${mediaItem.mediaId}")
+        // يمكن إضافة منطق لتتبع الSegments وضمان الاستمرارية
+        
+        // عرض معلومات للمستخدم (اختياري)
+        lifecycleScope.launch {
+            delay(500) // تأخير قصير لضمان الاستقرار
+            showPlayerInfo("تم تحميل مقطع جديد")
         }
     }
 
