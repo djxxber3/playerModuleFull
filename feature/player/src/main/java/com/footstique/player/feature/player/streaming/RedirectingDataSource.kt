@@ -36,6 +36,7 @@ class RedirectingDataSource(
     private var bytesRemaining: Long = C.LENGTH_UNSET
     private var opened = false
     private var preloadJob: Job? = null
+    private var currentSegmentUri: Uri? = null
     private val coroutineScope = CoroutineScope(Dispatchers.IO)
 
     override fun addTransferListener(transferListener: TransferListener) {
@@ -49,6 +50,7 @@ class RedirectingDataSource(
         try {
             // Get the actual segment URL through redirect
             val actualUri = resolveRedirect(dataSpec.uri)
+            currentSegmentUri = actualUri
             val redirectedDataSpec = dataSpec.buildUpon().setUri(actualUri).build()
             
             // Open the base data source with the redirected URI
@@ -73,6 +75,11 @@ class RedirectingDataSource(
         
         val bytesRead = baseDataSource.read(buffer, offset, length)
         
+        if (bytesRead == C.RESULT_END_OF_INPUT) {
+            // Current segment ended, try to transition to next segment
+            return handleSegmentTransition(buffer, offset, length)
+        }
+        
         if (bytesRead != C.RESULT_END_OF_INPUT && bytesRemaining != C.LENGTH_UNSET) {
             bytesRemaining -= bytesRead.toLong()
         }
@@ -91,6 +98,7 @@ class RedirectingDataSource(
             } finally {
                 opened = false
                 dataSpec = null
+                currentSegmentUri = null
                 bytesRemaining = C.LENGTH_UNSET
             }
         }
@@ -147,6 +155,94 @@ class RedirectingDataSource(
             uri
         } finally {
             connection?.disconnect()
+        }
+    }
+
+    /**
+     * Handles transition to the next segment when current segment ends
+     */
+    private fun handleSegmentTransition(buffer: ByteArray, offset: Int, length: Int): Int {
+        try {
+            Timber.d("Current segment ended, transitioning to next segment")
+            
+            // Record completion of current segment
+            if (currentSegmentUri != null) {
+                val currentSegmentInfo = SegmentManager.SegmentInfo(
+                    uri = currentSegmentUri!!,
+                    preloaded = false,
+                    timestamp = System.currentTimeMillis()
+                )
+                
+                // Record completion asynchronously to avoid blocking read operation
+                coroutineScope.launch {
+                    segmentManager.recordSegmentCompletion(currentSegmentInfo)
+                }
+            }
+            
+            // Close current data source
+            baseDataSource.close()
+            
+            // Get next segment URL through redirect
+            val nextSegmentUri = resolveRedirect(originalUri)
+            
+            // Check if we got a different segment (not the same as current)
+            if (nextSegmentUri != currentSegmentUri) {
+                Timber.d("Transitioning to next segment: $nextSegmentUri")
+                
+                // Open next segment
+                val nextDataSpec = dataSpec?.buildUpon()?.setUri(nextSegmentUri)?.build()
+                if (nextDataSpec != null) {
+                    val nextBytesReturned = baseDataSource.open(nextDataSpec)
+                    bytesRemaining = if (nextBytesReturned == C.LENGTH_UNSET) C.LENGTH_UNSET else nextBytesReturned
+                    currentSegmentUri = nextSegmentUri
+                    
+                    // Try to read from the new segment immediately
+                    val bytesRead = baseDataSource.read(buffer, offset, length)
+                    
+                    if (bytesRead != C.RESULT_END_OF_INPUT) {
+                        if (bytesRemaining != C.LENGTH_UNSET) {
+                            bytesRemaining -= bytesRead.toLong()
+                        }
+                        
+                        // Schedule preloading of the segment after this one
+                        scheduleNextSegmentPreload(nextSegmentUri)
+                        
+                        return bytesRead
+                    }
+                }
+            }
+            
+            // If we couldn't transition to next segment or got the same URI, 
+            // wait a moment and try again (for live streams)
+            Thread.sleep(100) // Brief pause before retry
+            val retrySegmentUri = resolveRedirect(originalUri)
+            
+            if (retrySegmentUri != currentSegmentUri) {
+                Timber.d("Retrying with new segment: $retrySegmentUri")
+                val retryDataSpec = dataSpec?.buildUpon()?.setUri(retrySegmentUri)?.build()
+                if (retryDataSpec != null) {
+                    val retryBytesReturned = baseDataSource.open(retryDataSpec)
+                    bytesRemaining = if (retryBytesReturned == C.LENGTH_UNSET) C.LENGTH_UNSET else retryBytesReturned
+                    currentSegmentUri = retrySegmentUri
+                    
+                    val bytesRead = baseDataSource.read(buffer, offset, length)
+                    if (bytesRead != C.RESULT_END_OF_INPUT) {
+                        if (bytesRemaining != C.LENGTH_UNSET) {
+                            bytesRemaining -= bytesRead.toLong()
+                        }
+                        scheduleNextSegmentPreload(retrySegmentUri)
+                        return bytesRead
+                    }
+                }
+            }
+            
+            // If all attempts failed, signal end of stream
+            Timber.w("Could not transition to next segment, ending stream")
+            return C.RESULT_END_OF_INPUT
+            
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to transition to next segment")
+            return C.RESULT_END_OF_INPUT
         }
     }
 
