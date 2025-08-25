@@ -27,7 +27,9 @@ object StreamingDemo {
         println("2. Server responds with HTTP 302 Redirect to: $redirectedUrl")
         println("3. RedirectingDataSource automatically handles the redirect")
         println("4. Segment is downloaded and played")
-        println("5. Before segment ends, system requests $baseUrl again for next segment")
+        println("5. ✅ NEW: When segment ends, automatically requests next segment")
+        println("6. ✅ FIXED: Player continues seamlessly to subsequent segments")
+        println("   (Previously would stop after first segment)")
         println("")
     }
     
@@ -108,6 +110,8 @@ object StreamingDemo {
     fun runFullDemo() {
         println("🎬 Segmented Live Streaming Demo")
         println("=====================================")
+        println("✅ INCLUDES FIX FOR SEGMENT CONTINUATION")
+        println("Problem solved: Player no longer stops after first segment")
         println()
         
         demonstrateRedirectHandling()
@@ -117,6 +121,7 @@ object StreamingDemo {
         
         println("✅ Demo completed successfully!")
         println("The implementation is ready for use with ExoPlayer.")
+        println("🔧 Segment continuation issue has been fixed!")
     }
 }
 

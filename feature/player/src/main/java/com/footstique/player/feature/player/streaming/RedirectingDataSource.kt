@@ -37,6 +37,8 @@ class RedirectingDataSource(
     private var opened = false
     private var preloadJob: Job? = null
     private var currentSegmentUri: Uri? = null
+    private var transitionAttempts = 0
+    private val maxTransitionAttempts = 3
     private val coroutineScope = CoroutineScope(Dispatchers.IO)
 
     override fun addTransferListener(transferListener: TransferListener) {
@@ -48,6 +50,9 @@ class RedirectingDataSource(
         this.dataSpec = dataSpec
         
         try {
+            // Reset transition attempts for new stream
+            transitionAttempts = 0
+            
             // Get the actual segment URL through redirect
             val actualUri = resolveRedirect(dataSpec.uri)
             currentSegmentUri = actualUri
@@ -99,6 +104,7 @@ class RedirectingDataSource(
                 opened = false
                 dataSpec = null
                 currentSegmentUri = null
+                transitionAttempts = 0
                 bytesRemaining = C.LENGTH_UNSET
             }
         }
@@ -162,8 +168,16 @@ class RedirectingDataSource(
      * Handles transition to the next segment when current segment ends
      */
     private fun handleSegmentTransition(buffer: ByteArray, offset: Int, length: Int): Int {
+        // Prevent infinite loops with transition attempts limit
+        if (transitionAttempts >= maxTransitionAttempts) {
+            Timber.w("Max transition attempts reached, ending stream")
+            return C.RESULT_END_OF_INPUT
+        }
+        
+        transitionAttempts++
+        
         try {
-            Timber.d("Current segment ended, transitioning to next segment")
+            Timber.d("Current segment ended, transitioning to next segment (attempt $transitionAttempts)")
             
             // Record completion of current segment
             if (currentSegmentUri != null) {
@@ -204,6 +218,9 @@ class RedirectingDataSource(
                             bytesRemaining -= bytesRead.toLong()
                         }
                         
+                        // Reset transition attempts on success
+                        transitionAttempts = 0
+                        
                         // Schedule preloading of the segment after this one
                         scheduleNextSegmentPreload(nextSegmentUri)
                         
@@ -214,7 +231,7 @@ class RedirectingDataSource(
             
             // If we couldn't transition to next segment or got the same URI, 
             // wait a moment and try again (for live streams)
-            Thread.sleep(100) // Brief pause before retry
+            Thread.sleep(500) // Brief pause before retry
             val retrySegmentUri = resolveRedirect(originalUri)
             
             if (retrySegmentUri != currentSegmentUri) {
@@ -230,6 +247,9 @@ class RedirectingDataSource(
                         if (bytesRemaining != C.LENGTH_UNSET) {
                             bytesRemaining -= bytesRead.toLong()
                         }
+                        
+                        // Reset transition attempts on success
+                        transitionAttempts = 0
                         scheduleNextSegmentPreload(retrySegmentUri)
                         return bytesRead
                     }
@@ -237,11 +257,11 @@ class RedirectingDataSource(
             }
             
             // If all attempts failed, signal end of stream
-            Timber.w("Could not transition to next segment, ending stream")
+            Timber.w("Could not transition to next segment after $transitionAttempts attempts, ending stream")
             return C.RESULT_END_OF_INPUT
             
         } catch (e: Exception) {
-            Timber.e(e, "Failed to transition to next segment")
+            Timber.e(e, "Failed to transition to next segment (attempt $transitionAttempts)")
             return C.RESULT_END_OF_INPUT
         }
     }
